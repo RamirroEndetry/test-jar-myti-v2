@@ -489,7 +489,7 @@ class Dish {
   constructor(def){
     Object.assign(this, def);
     this.rot = def.rot || 0;
-    const extent = def.len ? def.len : (def.r + (def.handle !== undefined ? 175 : 0)) * 2;
+    const extent = def.len ? def.len : (def.r + (def.handle !== undefined ? 175 : def.type === 'pot' ? 30 : def.type === 'mug' ? 24 : 0)) * 2;
     this.cw = this.ch = extent + 80;
     this.base = mk(this.cw, this.ch); this.grease = mk(this.cw, this.ch);
     this.render();
@@ -545,6 +545,74 @@ const DISH_DEFS = [
 ];
 let dishes = [];
 
+/* ===================== NÁHODNÉ ROZMÍSTĚNÍ =====================
+   Každé kolo se nádobí rozhodí po dřezu jinak: náhodné pozice, natočení příborů a držadel, jiné fleky.
+   Postup: náhodný rozhoz -> opakované odstrkování překrývajících se kusů a vracení do dřezu -> kontrola.
+   Když se rozmístění ani na několik pokusů nepovede, použije se původní pevné rozložení DISH_DEFS. */
+/*LAYOUT-BEGIN*/
+const LAYOUT = { MARGIN: 28, GAP: 6, ITERATIONS: 320, ATTEMPTS: 40, MAX_OVERLAP: .12 };
+// kolizní kruhy kusu v lokálních souřadnicích [x, y, poloměr] – tělo + držadla / podélný tvar příboru
+function footprint(d){
+  if (d.len){ const out = []; for (let i = 0; i < 4; i++){ const k = (i / 3 - .5) * (d.len - 40); out.push([Math.cos(d.rot) * k, Math.sin(d.rot) * k, 20]); } return out; }
+  const out = [[0, 0, d.r]];
+  if (d.type === 'pot') [-1, 1].forEach(k => out.push([Math.cos(d.rot) * k * (d.r + 24), Math.sin(d.rot) * k * (d.r + 24), 24]));
+  if (d.type === 'mug') out.push([Math.cos(d.rot) * (d.r + 16), Math.sin(d.rot) * (d.r + 16), 28]);
+  if (d.type === 'pan') [30, 68, 106, 144].forEach(k => out.push([Math.cos(d.handle) * (d.r + k), Math.sin(d.handle) * (d.r + k), 20]));
+  return out;
+}
+function layoutQuality(ds, W, H){
+  const M = LAYOUT.MARGIN; let worst = 0, outside = 0;
+  for (const d of ds) for (const c of d.fp){ const x = d.x + c[0], y = d.y + c[1]; outside = Math.max(outside, M + c[2] - x, x + c[2] - (W - M), M + c[2] - y, y + c[2] - (H - M)); }
+  for (let i = 0; i < ds.length; i++) for (let j = i + 1; j < ds.length; j++)
+    for (const a of ds[i].fp) for (const b of ds[j].fp){
+      const dist = Math.hypot(ds[j].x + b[0] - ds[i].x - a[0], ds[j].y + b[1] - ds[i].y - a[1]);
+      worst = Math.max(worst, (a[2] + b[2] - dist) / Math.min(a[2], b[2]));
+    }
+  return { worst, outside };
+}
+function makeLayout(defs, W, H, rand){
+  const M = LAYOUT.MARGIN;
+  for (let attempt = 0; attempt < LAYOUT.ATTEMPTS; attempt++){
+    const ds = defs.map(src => {
+      const d = { type: src.type, seed: 1 + Math.floor(rand() * 1e6) };
+      if (src.len){ d.len = src.len; d.rot = rand() * Math.PI; } else d.r = src.r;
+      if (d.type === 'pan') d.handle = rand() * TAU;
+      if (d.type === 'pot' || d.type === 'mug') d.rot = rand() * TAU;
+      d.x = 120 + rand() * (W - 240); d.y = 120 + rand() * (H - 240); d.fp = footprint(d);
+      return d;
+    });
+    for (let it = 0; it < LAYOUT.ITERATIONS; it++){
+      for (let i = 0; i < ds.length; i++) for (let j = i + 1; j < ds.length; j++){
+        const A = ds[i], B = ds[j];
+        for (const a of A.fp) for (const b of B.fp){
+          let dx = B.x + b[0] - A.x - a[0], dy = B.y + b[1] - A.y - a[1], dist = Math.hypot(dx, dy);
+          const need = a[2] + b[2] + LAYOUT.GAP;
+          if (dist >= need) continue;
+          if (dist < .01){ dx = rand() - .5; dy = rand() - .5; dist = Math.hypot(dx, dy); }
+          const push = (need - dist) * .5, ux = dx / dist, uy = dy / dist;
+          // menší kus uhýbá víc než velký
+          const wa = b[2] / (a[2] + b[2]), wb = 1 - wa;
+          A.x -= ux * push * wa; A.y -= uy * push * wa; B.x += ux * push * wb; B.y += uy * push * wb;
+        }
+      }
+      for (const d of ds) for (const c of d.fp){
+        const x = d.x + c[0], y = d.y + c[1];
+        if (x - c[2] < M) d.x += M - (x - c[2]); if (x + c[2] > W - M) d.x -= x + c[2] - (W - M);
+        if (y - c[2] < M) d.y += M - (y - c[2]); if (y + c[2] > H - M) d.y -= y + c[2] - (H - M);
+      }
+    }
+    const q = layoutQuality(ds, W, H);
+    if (q.worst <= LAYOUT.MAX_OVERLAP && q.outside <= 1){
+      // velké kusy dole, sklenice a příbory navrchu (pořadí = pořadí kreslení i přednost při drhnutí)
+      ds.sort((a, b) => (b.r || 20) - (a.r || 20));
+      ds.forEach(d => { d.x = Math.round(d.x); d.y = Math.round(d.y); delete d.fp; });
+      return ds;
+    }
+  }
+  return defs.map(d => ({ ...d }));   // záloha: původní pevné rozložení
+}
+/*LAYOUT-END*/
+
 /* ===================== BASIN (cached) ===================== */
 const basin = mk(CW, CH);
 (function drawBasin(){
@@ -582,7 +650,7 @@ const $ = id => document.getElementById(id);
 const timeEl = $('time'), scoreEl = $('score'), timePill = $('timePill');
 
 function resetGame(){
-  dishes = DISH_DEFS.map(d => new Dish(d));
+  dishes = makeLayout(DISH_DEFS, CW, CH, Math.random).map(d => new Dish(d));
   score = 0; shownScore = 0; timeLeft = GAME_TIME; combo = 0; cleanedCount = 0; lastCleanAt = -99;
   stats = { wash: 0, speed: 0, combo: 0, time: 0 };
   bubbles = []; sparkles = []; floaters = [];
